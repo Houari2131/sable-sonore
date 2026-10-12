@@ -37,10 +37,13 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: calc(env(safe-area-inset-top, 0px) + 52px) 12px calc(env(safe-area-inset-bottom, 0px) + 172px + var(--extra, 0px));
+    padding: calc(env(safe-area-inset-top, 0px) + 52px) 12px calc(env(safe-area-inset-bottom, 0px) + 236px + var(--extra, 0px));
     box-sizing: border-box;
   }
-  canvas { display: block; background: #000; }
+  .plateWrap { position: relative; background: #000; }
+  .plateWrap canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  #halo { opacity: .55; }
+  .fx button { padding: 8px 14px; min-height: 40px; font-size: 13px; }
 
   .top {
     position: fixed;
@@ -92,7 +95,7 @@
 </style>
 </head>
 <body>
-<main><canvas id="plate" aria-label="Plaque de sable animée par le son"></canvas></main>
+<main><div class="plateWrap" id="wrap"><canvas id="halo" aria-hidden="true"></canvas><canvas id="plate" aria-label="Plaque de sable animée par le son"></canvas></div></main>
 
 <header class="top">
   <h1>Sable sonore</h1>
@@ -107,9 +110,15 @@
     <button id="btnFile" type="button" aria-pressed="false">Fichier audio</button>
     <input id="file" type="file" accept="audio/*">
   </div>
+  <div class="row fx">
+    <button id="fxGlow" type="button" aria-pressed="true">Lueur</button>
+    <button id="fxKick" type="button" aria-pressed="true">Impulsion</button>
+    <button id="fxMandala" type="button" aria-pressed="false">Mandala</button>
+    <button id="fxHaptic" type="button" aria-pressed="false">Vibration</button>
+  </div>
   <div class="row sens">
     <label for="sens">Sensibilité</label>
-    <input id="sens" type="range" min="0" max="100" value="55">
+    <input id="sens" type="range" min="0" max="100" value="100">
   </div>
   <details class="tune">
     <summary>Réglages</summary>
@@ -133,6 +142,8 @@
 
   const $ = (id) => document.getElementById(id);
   const plate = $('plate'), pctx = plate.getContext('2d');
+  const halo = $('halo'), hctx = halo.getContext('2d'), wrap = $('wrap');
+  let hpx = 0, hImg = null, hbuf = null, hacc = null;
   const main = document.querySelector('main');
   const statusEl = $('status'), readoutEl = $('readout');
   const btns = { mic: $('btnMic'), demo: $('btnDemo'), file: $('btnFile') };
@@ -146,10 +157,12 @@
 
   // ---------- Particules (le sable) ----------
   let side = 0, scale = 1, px = 0, ps = 1, img = null, buf32 = null;
-  let N = 0, xs = null, ys = null, needsDraw = true;
+  let N = 0, xs = null, ys = null, sp = null, needsDraw = true;
 
   // Réglages ajustables en direct (valeurs par défaut)
-  const T = { grain: 0.7, count: window.innerWidth < 600 ? 20000 : 28000, sharp: 0.6, smooth: 0.6, agit: 1 };
+  const T = { grain: 0.5, count: 40000, sharp: 0.95, smooth: 1, agit: 1.3, glow: 1, kick: 1, mandala: 0, haptic: 0 };
+  // nombre de grains simulés : en mode mandala, chacun est dessiné 4 ou 8 fois
+  function activeCount() { return T.mandala === 2 ? N >> 3 : T.mandala === 1 ? N >> 2 : N; }
 
   function setCount(n) {
     n = Math.round(n);
@@ -160,7 +173,7 @@
       if (i < keep) { nx[i] = xs[i]; ny[i] = ys[i]; }
       else { nx[i] = Math.random(); ny[i] = Math.random(); }
     }
-    xs = nx; ys = ny; N = n; needsDraw = true;
+    xs = nx; ys = ny; sp = new Float32Array(n); N = n; needsDraw = true;
   }
 
   function layout() {
@@ -171,9 +184,14 @@
     const dpr = window.devicePixelRatio || 1;
     scale = Math.min(dpr, 900 / side);
     px = Math.round(side * scale);
-    plate.style.width = side + 'px';
-    plate.style.height = side + 'px';
+    wrap.style.width = side + 'px';
+    wrap.style.height = side + 'px';
     plate.width = px; plate.height = px;
+    hpx = Math.max(96, Math.round(px / 3));
+    halo.width = hpx; halo.height = hpx;
+    hImg = hctx.createImageData(hpx, hpx);
+    hbuf = new Uint32Array(hImg.data.buffer);
+    hacc = new Uint8Array(hpx * hpx);
     img = pctx.createImageData(px, px);
     buf32 = new Uint32Array(img.data.buffer);
     ps = Math.max(1, Math.round(scale * T.grain));
@@ -191,10 +209,12 @@
     const base = 0.003 - 0.0026 * T.sharp, gain = 0.022 * T.agit;
     // mélange des deux modes : évite la diagonale x=y, toujours nodale avec un signe moins pur
     const sMix = 0.65 + 0.35 * Math.sin(P.c * 1.1 + P.h * 0.7);
-    for (let i = 0; i < N; i++) {
+    const M = activeCount(), kk = kick * 0.035;
+    for (let i = 0; i < M; i++) {
       let x = xs[i], y = ys[i];
       const f = Math.cos(nP * x) * Math.cos(mP * y) + sMix * Math.cos(mP * x) * Math.cos(nP * y);
-      const s = energy * (base + gain * Math.abs(f));
+      const s = energy * (base + gain * Math.abs(f)) + kk;
+      sp[i] = s;
       x += (Math.random() * 2 - 1) * s;
       y += (Math.random() * 2 - 1) * s;
       if (x < 0) x = -x; else if (x > 1) x = 2 - x;
@@ -204,16 +224,45 @@
   }
 
   function render() {
-    buf32.fill(0xFF000000);
-    const span = px - ps;
-    for (let i = 0; i < N; i++) {
-      const ix = (xs[i] * span) | 0, iy = (ys[i] * span) | 0;
+    buf32.fill(0);
+    const glow = T.glow, mode = T.mandala;
+    if (glow) hacc.fill(0);
+    const span = px - ps, hs = hpx - 1;
+    const put = (xx, yy, col) => {
+      const ix = (xx * span) | 0, iy = (yy * span) | 0;
       for (let dy = 0; dy < ps; dy++) {
         const row = (iy + dy) * px + ix;
-        for (let dx = 0; dx < ps; dx++) buf32[row + dx] = 0xFFFFFFFF;
+        for (let dx = 0; dx < ps; dx++) buf32[row + dx] = col;
+      }
+      if (glow) {
+        const h = ((yy * hs) | 0) * hpx + ((xx * hs) | 0);
+        const a = hacc[h] + 26;
+        hacc[h] = a > 255 ? 255 : a;
+      }
+    };
+    const M = activeCount();
+    for (let i = 0; i < M; i++) {
+      const x = xs[i], y = ys[i];
+      let v = 255;
+      if (glow) { v = 170 + sp[i] * 2200; if (v > 255) v = 255; v = v | 0; }
+      const col = 0xFF000000 | (v << 16) | (v << 8) | v;
+      put(x, y, col);
+      if (mode > 0) {
+        const X = 1 - x, Y = 1 - y;
+        put(X, y, col); put(x, Y, col); put(X, Y, col);
+        if (mode > 1) { put(y, x, col); put(Y, x, col); put(y, X, col); put(Y, X, col); }
       }
     }
     pctx.putImageData(img, 0, 0);
+    if (glow) {
+      for (let i = 0, n = hbuf.length; i < n; i++) {
+        const a = hacc[i];
+        hbuf[i] = a ? ((a << 24) | 0xFFFFFF) : 0;
+      }
+      hctx.putImageData(hImg, 0, 0);
+    } else {
+      hctx.clearRect(0, 0, hpx, hpx);
+    }
   }
 
   // ---------- Audio ----------
@@ -419,10 +468,18 @@
   }
 
   // ---------- Boucle principale ----------
-  let lastReadout = 0;
+  let lastReadout = 0, kick = 0, prevLv = 0, lastKick = -1000;
   function frame(t) {
     requestAnimationFrame(frame);
     const info = S.active ? analyze() : (reduceMotion ? { on: false } : sim(t / 1000));
+    // impulsion : une attaque brusque projette les grains, qui retombent ensuite sur les lignes
+    const lvNow = info.on ? info.lv : 0;
+    if (T.kick && lvNow - prevLv > 0.2 && t - lastKick > 80) {
+      kick = 1; lastKick = t;
+      if (T.haptic && navigator.vibrate) navigator.vibrate(18);
+    }
+    prevLv = lvNow;
+    kick *= 0.82;
     if (info.on) {
       const pos = clamp((Math.log(info.f) - LN_MIN) / (LN_MAX - LN_MIN), 0, 1);
       const cT = 4 + 8 * pos;
@@ -436,7 +493,7 @@
     }
     const energy = Math.pow(level, 0.6);
 
-    if (energy > 0.003) { stepParticles(energy); needsDraw = true; }
+    if (energy > 0.003 || kick > 0.02) { stepParticles(energy); needsDraw = true; }
     if (needsDraw) { render(); needsDraw = false; }
 
     if (t - lastReadout > 120) {
@@ -470,6 +527,27 @@
     try { await navigator.clipboard.writeText(txt); setStatus('Réglages copiés. Colle-les dans la conversation.'); }
     catch (e) { setStatus(txt); }
   });
+
+  // ---------- Effets ----------
+  const fx = { glow: $('fxGlow'), kick: $('fxKick'), mandala: $('fxMandala'), haptic: $('fxHaptic') };
+  function syncFx() {
+    fx.glow.setAttribute('aria-pressed', String(!!T.glow));
+    fx.kick.setAttribute('aria-pressed', String(!!T.kick));
+    fx.haptic.setAttribute('aria-pressed', String(!!T.haptic));
+    fx.mandala.setAttribute('aria-pressed', String(T.mandala > 0));
+    fx.mandala.textContent = T.mandala === 0 ? 'Mandala' : 'Mandala ' + (T.mandala === 1 ? '×4' : '×8');
+    needsDraw = true;
+  }
+  fx.glow.addEventListener('click', () => { T.glow = T.glow ? 0 : 1; syncFx(); });
+  fx.kick.addEventListener('click', () => { T.kick = T.kick ? 0 : 1; if (!T.kick) kick = 0; syncFx(); });
+  fx.mandala.addEventListener('click', () => { T.mandala = (T.mandala + 1) % 3; syncFx(); });
+  fx.haptic.addEventListener('click', () => {
+    T.haptic = T.haptic ? 0 : 1;
+    if (T.haptic && !navigator.vibrate) { setStatus("La vibration n'est pas disponible sur cet appareil."); T.haptic = 0; }
+    else if (T.haptic) navigator.vibrate(30);
+    syncFx();
+  });
+  syncFx();
 
   layout();
   requestAnimationFrame(frame);
