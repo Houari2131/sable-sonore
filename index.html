@@ -1,0 +1,423 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Sable sonore</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #000;
+    --ink: #f4f4f4;
+    --dim: #8f8f8f;
+    --line: #353535;
+    color-scheme: dark;
+    box-sizing: border-box;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  html {
+    height: 100%;
+    scroll-padding-top: env(safe-area-inset-top, 0px);
+    background: var(--bg);
+  }
+  body {
+    margin: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Instrument Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    overflow: hidden;
+  }
+  main {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: calc(env(safe-area-inset-top, 0px) + 52px) 12px calc(env(safe-area-inset-bottom, 0px) + 172px);
+    box-sizing: border-box;
+  }
+  canvas { display: block; background: #000; }
+
+  .top {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 16px;
+    padding: calc(env(safe-area-inset-top, 0px) + 14px) 18px 0;
+    pointer-events: none;
+  }
+  h1 { margin: 0; font-size: 15px; font-weight: 500; letter-spacing: .01em; }
+  #readout { font-size: 15px; color: var(--dim); font-variant-numeric: tabular-nums; }
+
+  .bar {
+    position: fixed;
+    bottom: 0; left: 0; right: 0;
+    display: grid;
+    gap: 12px;
+    padding: 0 16px calc(env(safe-area-inset-bottom, 0px) + 16px);
+  }
+  #status { min-height: 1.3em; text-align: center; font-size: 13px; color: var(--dim); line-height: 1.3; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; align-items: center; }
+  button {
+    font: inherit; font-size: 14px; font-weight: 500;
+    color: var(--ink);
+    background: transparent;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 11px 18px;
+    min-height: 44px;
+    cursor: pointer;
+    transition: background-color .15s, color .15s, border-color .15s;
+  }
+  button:hover { border-color: #777; }
+  button[aria-pressed="true"] { background: #fff; color: #000; border-color: #fff; }
+  button:focus-visible, input[type="range"]:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
+  .sens { color: var(--dim); font-size: 13px; gap: 12px; }
+  input[type="range"] { width: min(240px, 56vw); accent-color: #fff; }
+  #file { display: none; }
+</style>
+</head>
+<body>
+<main><canvas id="plate" aria-label="Plaque de sable animée par le son"></canvas></main>
+
+<header class="top">
+  <h1>Sable sonore</h1>
+  <div id="readout" aria-hidden="true">simulation</div>
+</header>
+
+<footer class="bar">
+  <div id="status" role="status" aria-live="polite">Démo automatique, sans micro ni son. « Démo sonore » la fait entendre ; « Fichier audio » teste un vrai chant.</div>
+  <div class="row">
+    <button id="btnMic" type="button" aria-pressed="false">Micro</button>
+    <button id="btnDemo" type="button" aria-pressed="false">Démo sonore</button>
+    <button id="btnFile" type="button" aria-pressed="false">Fichier audio</button>
+    <input id="file" type="file" accept="audio/*">
+  </div>
+  <div class="row sens">
+    <label for="sens">Sensibilité</label>
+    <input id="sens" type="range" min="0" max="100" value="55">
+  </div>
+</footer>
+
+<script>
+(() => {
+  // ---------- Réglages ----------
+  const FMIN = 500, FMAX = 9000;           // plage utile pour des chants d'oiseaux (Hz)
+  const LN_MIN = Math.log(FMIN), LN_MAX = Math.log(FMAX);
+  const reduceMotion = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  const $ = (id) => document.getElementById(id);
+  const plate = $('plate'), pctx = plate.getContext('2d');
+  const main = document.querySelector('main');
+  const statusEl = $('status'), readoutEl = $('readout');
+  const btns = { mic: $('btnMic'), demo: $('btnDemo'), file: $('btnFile') };
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const rand = (a, b) => a + Math.random() * (b - a);
+
+  let gate = -70;                           // seuil en dB (réglé par le curseur)
+  const sens = $('sens');
+  const applySens = () => { gate = -40 - Number(sens.value) * 0.55; };
+  sens.addEventListener('input', applySens); applySens();
+
+  // ---------- Particules (le sable) ----------
+  let side = 0, scale = 1, px = 0, ps = 1, img = null, buf32 = null;
+  let N = 0, xs = null, ys = null, needsDraw = true;
+
+  function layout() {
+    const cs = getComputedStyle(main);
+    const availW = main.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+    const availH = main.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+    side = Math.max(200, Math.floor(Math.min(availW, availH)));
+    const dpr = window.devicePixelRatio || 1;
+    scale = Math.min(dpr, 900 / side);
+    px = Math.round(side * scale);
+    plate.style.width = side + 'px';
+    plate.style.height = side + 'px';
+    plate.width = px; plate.height = px;
+    img = pctx.createImageData(px, px);
+    buf32 = new Uint32Array(img.data.buffer);
+    ps = Math.max(1, Math.round(scale * 1.1));
+    const n = window.innerWidth < 600 ? 14000 : 26000;
+    if (!xs || xs.length !== n) {
+      N = n; xs = new Float32Array(n); ys = new Float32Array(n);
+      for (let i = 0; i < n; i++) { xs[i] = Math.random(); ys[i] = Math.random(); }
+    }
+    needsDraw = true;
+  }
+  window.addEventListener('resize', layout);
+
+  // Paramètres de la plaque : n = c + h, m = c - h (h >= 0.5 : jamais dégénéré)
+  const P = { c: 7, h: 1.6 };
+  let level = 0;
+
+  function stepParticles(energy) {
+    const nP = (P.c + P.h) * Math.PI, mP = (P.c - P.h) * Math.PI;
+    const base = 0.0015, gain = 0.022;
+    const sMix = 0.65 + 0.35 * Math.sin(P.c * 1.1 + P.h * 0.7);
+    for (let i = 0; i < N; i++) {
+      let x = xs[i], y = ys[i];
+      const f = Math.cos(nP * x) * Math.cos(mP * y) + sMix * Math.cos(mP * x) * Math.cos(nP * y);
+      const s = energy * (base + gain * Math.abs(f));
+      x += (Math.random() * 2 - 1) * s;
+      y += (Math.random() * 2 - 1) * s;
+      if (x < 0) x = -x; else if (x > 1) x = 2 - x;
+      if (y < 0) y = -y; else if (y > 1) y = 2 - y;
+      xs[i] = x; ys[i] = y;
+    }
+  }
+
+  function render() {
+    buf32.fill(0xFF000000);
+    const span = px - ps;
+    for (let i = 0; i < N; i++) {
+      const ix = (xs[i] * span) | 0, iy = (ys[i] * span) | 0;
+      for (let dy = 0; dy < ps; dy++) {
+        const row = (iy + dy) * px + ix;
+        for (let dx = 0; dx < ps; dx++) buf32[row + dx] = 0xFFFFFFFF;
+      }
+    }
+    pctx.putImageData(img, 0, 0);
+  }
+
+  // ---------- Audio ----------
+  const S = { ctx: null, analyser: null, spec: null, cleanup: null, mode: null, active: false };
+
+  async function ensureCtx() {
+    if (!S.ctx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      S.ctx = new AC();
+      S.analyser = S.ctx.createAnalyser();
+      S.analyser.fftSize = 2048;
+      S.analyser.smoothingTimeConstant = 0.35;
+      S.analyser.minDecibels = -110;
+      S.analyser.maxDecibels = -10;
+      S.spec = new Float32Array(S.analyser.frequencyBinCount);
+    }
+    if (S.ctx.state === 'suspended') await S.ctx.resume();
+  }
+
+  function setStatus(msg) { statusEl.textContent = msg; }
+  function setMode(mode, msg) {
+    S.mode = mode; S.active = !!mode;
+    for (const k in btns) btns[k].setAttribute('aria-pressed', String(k === mode));
+    if (msg) setStatus(msg);
+  }
+  function stopSource(msg) {
+    if (S.cleanup) { try { S.cleanup(); } catch (e) {} S.cleanup = null; }
+    setMode(null, msg ? msg + " Retour à la démo automatique." : msg);
+  }
+
+  async function startMic() {
+    stopSource();
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setStatus("Micro indisponible ici. Ouvre la page dans un onglet à part, ou lance la démo.");
+      return;
+    }
+    try {
+      await ensureCtx();
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+      });
+      const src = S.ctx.createMediaStreamSource(stream);
+      src.connect(S.analyser);
+      S.cleanup = () => { src.disconnect(); stream.getTracks().forEach((t) => t.stop()); };
+      setMode('mic', "Micro actif. Rapproche-toi de la source sonore.");
+    } catch (err) {
+      const why = !window.isSecureContext
+        ? "Page non sécurisée (fichier local) : le navigateur bloque le micro. Il faut la servir en https ou via localhost."
+        : err && err.name === 'NotFoundError' ? "Aucun micro détecté sur cet appareil."
+        : err && err.name === 'NotReadableError' ? "Le micro est utilisé par une autre application."
+        : "Autorisation refusée : touche le cadenas à côté de l'adresse, puis Micro, puis Autoriser. Sur Android, vérifie aussi Réglages, Applications, Chrome, Autorisations.";
+      setStatus(why + " (" + ((err && err.name) || 'erreur') + ")");
+    }
+  }
+
+  async function startDemo() {
+    stopSource();
+    await ensureCtx();
+    const ctx = S.ctx;
+    const o1 = ctx.createOscillator(), o2 = ctx.createOscillator();
+    const h2 = ctx.createGain(), env = ctx.createGain(), mon = ctx.createGain();
+    o1.type = 'sine'; o2.type = 'sine';
+    h2.gain.value = 0.25; env.gain.value = 0; mon.gain.value = 0.18;
+    o1.connect(env); o2.connect(h2); h2.connect(env);
+    env.connect(S.analyser); env.connect(mon); mon.connect(ctx.destination);
+    o1.frequency.value = 3000; o2.frequency.value = 6000;
+    o1.start(); o2.start();
+
+    const freqAt = (f, t) => { o1.frequency.setValueAtTime(f, t); o2.frequency.setValueAtTime(f * 2, t); };
+    const freqTo = (f, t) => { o1.frequency.exponentialRampToValueAtTime(f, t); o2.frequency.exponentialRampToValueAtTime(f * 2, t); };
+    const shape = (t, d, pk) => {
+      env.gain.setValueAtTime(0, t);
+      env.gain.linearRampToValueAtTime(pk, t + Math.min(0.02, d / 3));
+      env.gain.linearRampToValueAtTime(0, t + d);
+    };
+    let tNext = ctx.currentTime + 0.1;
+
+    function phrase() {
+      const r = Math.random();
+      let t = tNext;
+      if (r < 0.4) {
+        const up = Math.random() < 0.5, a = rand(1800, 4200), d = rand(0.12, 0.35);
+        const b = clamp(up ? a * rand(1.4, 2.2) : a / rand(1.4, 2.2), 900, 8500);
+        freqAt(a, t); freqTo(b, t + d); shape(t, d, 0.5); t += d;
+      } else if (r < 0.75) {
+        const base = rand(2500, 5500), n = 4 + ((Math.random() * 6) | 0);
+        for (let i = 0; i < n; i++) {
+          freqAt(base, t); freqTo(base * 1.5, t + 0.05); shape(t, 0.05, 0.45); t += 0.085;
+        }
+      } else {
+        const f = rand(2000, 6500), d = rand(0.3, 0.6);
+        freqAt(f, t);
+        for (let i = 1; i <= 6; i++) freqTo(f * (i % 2 ? 1.05 : 0.95), t + (d * i) / 6);
+        shape(t, d, 0.5); t += d;
+      }
+      tNext = t + rand(0.15, 0.7);
+    }
+    const plan = () => { while (tNext < ctx.currentTime + 1.2) phrase(); };
+    plan();
+    const timer = setInterval(plan, 250);
+
+    S.cleanup = () => {
+      clearInterval(timer);
+      try { o1.stop(); o2.stop(); } catch (e) {}
+      env.disconnect(); mon.disconnect(); h2.disconnect();
+    };
+    setMode('demo', "Démo : chant d'oiseau synthétique, avec glissandos, trilles et sifflements.");
+  }
+
+  async function startFile(file) {
+    stopSource();
+    try {
+      await ensureCtx();
+      setStatus("Lecture du fichier…");
+      const data = await file.arrayBuffer();
+      const buffer = await S.ctx.decodeAudioData(data);
+      const src = S.ctx.createBufferSource();
+      src.buffer = buffer; src.loop = true;
+      src.connect(S.analyser); src.connect(S.ctx.destination);
+      src.start();
+      S.cleanup = () => { try { src.stop(); } catch (e) {} src.disconnect(); };
+      setMode('file', "Lecture en boucle : " + (file.name.length > 40 ? file.name.slice(0, 37) + "…" : file.name));
+    } catch (err) {
+      setStatus("Ce fichier n'a pas pu être lu. Essaie un mp3, wav ou m4a.");
+    }
+  }
+
+  btns.mic.addEventListener('click', () => (S.mode === 'mic' ? stopSource("Source arrêtée.") : startMic()));
+  btns.demo.addEventListener('click', () => (S.mode === 'demo' ? stopSource("Source arrêtée.") : startDemo()));
+  btns.file.addEventListener('click', () => {
+    if (S.mode === 'file') stopSource("Source arrêtée."); else $('file').click();
+  });
+  $('file').addEventListener('change', (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (f) startFile(f);
+    e.target.value = '';
+  });
+
+  // ---------- Analyse du spectre ----------
+  function analyze() {
+    const an = S.analyser, spec = S.spec;
+    an.getFloatFrequencyData(spec);
+    const binHz = S.ctx.sampleRate / an.fftSize;
+    const lo = Math.max(2, Math.floor(FMIN / binHz));
+    const hi = Math.min(spec.length - 2, Math.ceil(FMAX / binHz));
+    let maxDb = -Infinity, k = lo;
+    for (let i = lo; i <= hi; i++) if (spec[i] > maxDb) { maxDb = spec[i]; k = i; }
+    if (!isFinite(maxDb) || maxDb < gate) return { on: false };
+
+    const a = spec[k - 1], b = spec[k], c = spec[k + 1];
+    const den = a - 2 * b + c;
+    const p = isFinite(den) && den !== 0 ? 0.5 * (a - c) / den : 0;
+    const f = (k + clamp(p, -1, 1)) * binHz;
+
+    const thr = maxDb - 25;
+    let sw = 0, sl = 0, sl2 = 0;
+    for (let i = lo; i <= hi; i++) {
+      if (spec[i] > thr) {
+        const w = Math.pow(10, (spec[i] - maxDb) / 10);
+        const l = Math.log((i + 0.5) * binHz);
+        sw += w; sl += w * l; sl2 += w * l * l;
+      }
+    }
+    const mean = sl / sw;
+    const spread = Math.sqrt(Math.max(0, sl2 / sw - mean * mean));
+    return { on: true, f, lv: clamp((maxDb - gate) / 28, 0, 1), spread };
+  }
+
+  // ---------- Simulation silencieuse (sans micro, sans son) ----------
+  const simState = { phrase: null };
+  function newSimPhrase(t0) {
+    const r = Math.random();
+    let ph;
+    if (r < 0.4) {
+      const up = Math.random() < 0.5, a = rand(1800, 4200);
+      const b = clamp(up ? a * rand(1.4, 2.2) : a / rand(1.4, 2.2), 900, 8500);
+      ph = { type: 'sweep', d: rand(0.2, 0.5), a, b };
+    } else if (r < 0.75) {
+      const n = 4 + ((Math.random() * 6) | 0);
+      ph = { type: 'trill', d: n * 0.085, base: rand(2500, 5500) };
+    } else {
+      ph = { type: 'whistle', d: rand(0.4, 0.8), f: rand(2000, 6500) };
+    }
+    ph.t0 = t0; ph.gap = rand(0.15, 0.7);
+    return ph;
+  }
+  function sim(ts) {
+    let p = simState.phrase;
+    if (!p || ts > p.t0 + p.d + p.gap) p = simState.phrase = newSimPhrase(ts);
+    const u = ts - p.t0;
+    if (u > p.d) return { on: false };
+    const env = Math.sin(Math.PI * clamp(u / p.d, 0, 1));
+    if (p.type === 'sweep') {
+      return { on: true, f: p.a * Math.pow(p.b / p.a, u / p.d), lv: 0.25 + 0.65 * env, spread: 0.25 };
+    }
+    if (p.type === 'trill') {
+      const cell = u % 0.085;
+      if (cell > 0.05) return { on: false };
+      return { on: true, f: p.base * Math.pow(1.5, cell / 0.05), lv: 0.85, spread: 0.35 };
+    }
+    return { on: true, f: p.f * (1 + 0.05 * Math.sin(u * 2 * Math.PI * 6)), lv: 0.25 + 0.65 * env, spread: 0.08 };
+  }
+
+  // ---------- Boucle principale ----------
+  let lastReadout = 0;
+  function frame(t) {
+    requestAnimationFrame(frame);
+    const info = S.active ? analyze() : (reduceMotion ? { on: false } : sim(t / 1000));
+    if (info.on) {
+      const pos = clamp((Math.log(info.f) - LN_MIN) / (LN_MAX - LN_MIN), 0, 1);
+      const cT = 4 + 8 * pos;
+      const hT = Math.min(0.6 + 4.2 * clamp(info.spread * 1.6, 0, 1), cT - 0.8);
+      P.c += (cT - P.c) * 0.14;
+      P.h += (hT - P.h) * 0.10;
+      level += (info.lv - level) * (info.lv > level ? 0.5 : 0.1);
+    } else {
+      level *= 0.86;
+    }
+    const energy = Math.pow(level, 0.6);
+
+    if (energy > 0.003) { stepParticles(energy); needsDraw = true; }
+    if (needsDraw) { render(); needsDraw = false; }
+
+    if (t - lastReadout > 120) {
+      lastReadout = t;
+      let txt;
+      if (info.on) txt = Math.round(info.f).toLocaleString('fr-FR') + ' Hz' + (S.active ? '' : ' (simulé)');
+      else txt = S.active ? 'silence' : 'simulation';
+      if (readoutEl.textContent !== txt) readoutEl.textContent = txt;
+    }
+  }
+
+  layout();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
